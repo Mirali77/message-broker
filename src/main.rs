@@ -11,8 +11,16 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:50051".to_owned())
         .parse::<SocketAddr>()?;
 
+    let service = match std::env::var("BROKER_DATA_DIR") {
+        Ok(path) => {
+            info!(%path, "durable storage enabled");
+            BrokerService::with_storage_path(path)?
+        }
+        Err(_) => BrokerService::new(),
+    };
+
     info!("starting broker on {}", addr);
-    serve(addr, BrokerService::new()).await?;
+    serve(addr, service).await?;
 
     Ok(())
 }

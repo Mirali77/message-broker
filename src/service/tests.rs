@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use tempfile::tempdir;
 use tonic::{Code, Request};
 use uuid::Uuid;
 
@@ -381,4 +382,89 @@ fn normalization_helpers_apply_defaults_and_limits() {
     );
     assert_eq!(normalize_visibility_timeout(0), DEFAULT_VISIBILITY_TIMEOUT);
     assert_eq!(normalize_visibility_timeout(42), Duration::from_millis(42));
+}
+
+#[tokio::test]
+async fn durable_storage_restores_ready_messages_after_restart() {
+    let data_dir = tempdir().unwrap();
+
+    {
+        let service = BrokerService::with_storage_path(data_dir.path()).unwrap();
+        publish(&service, "jobs", b"durable").await;
+    }
+
+    let service = BrokerService::with_storage_path(data_dir.path()).unwrap();
+    let stats = stats(&service, "jobs").await;
+    assert_eq!(stats.ready, 1);
+    assert_eq!(stats.in_flight, 0);
+
+    let pulled = pull_once(&service, "jobs").await;
+    assert_eq!(pulled.messages.len(), 1);
+    assert_eq!(pulled.messages[0].payload, b"durable");
+}
+
+#[tokio::test]
+async fn durable_storage_requeues_in_flight_messages_after_restart() {
+    let data_dir = tempdir().unwrap();
+
+    let first_delivery_id = {
+        let service = BrokerService::with_storage_path(data_dir.path()).unwrap();
+        publish(&service, "jobs", b"in-flight").await;
+        let pulled = pull(&service, "jobs", 1, 30_000, 0).await;
+        assert_eq!(pulled.messages.len(), 1);
+        pulled.messages[0].delivery_id.clone()
+    };
+
+    let service = BrokerService::with_storage_path(data_dir.path()).unwrap();
+    let stats = stats(&service, "jobs").await;
+    assert_eq!(stats.ready, 1);
+    assert_eq!(stats.in_flight, 0);
+
+    let pulled = pull_once(&service, "jobs").await;
+    assert_eq!(pulled.messages.len(), 1);
+    assert_eq!(pulled.messages[0].payload, b"in-flight");
+    assert_eq!(pulled.messages[0].attempts, 2);
+    assert_ne!(pulled.messages[0].delivery_id, first_delivery_id);
+}
+
+#[tokio::test]
+async fn durable_storage_does_not_restore_acked_messages() {
+    let data_dir = tempdir().unwrap();
+
+    {
+        let service = BrokerService::with_storage_path(data_dir.path()).unwrap();
+        publish(&service, "jobs", b"done").await;
+        let pulled = pull_once(&service, "jobs").await;
+        assert!(
+            ack(&service, pulled.messages[0].delivery_id.clone())
+                .await
+                .acknowledged
+        );
+    }
+
+    let service = BrokerService::with_storage_path(data_dir.path()).unwrap();
+    let stats = stats(&service, "jobs").await;
+    assert_eq!(stats.ready, 0);
+    assert_eq!(stats.in_flight, 0);
+}
+
+#[tokio::test]
+async fn durable_storage_does_not_restore_nacked_without_requeue_messages() {
+    let data_dir = tempdir().unwrap();
+
+    {
+        let service = BrokerService::with_storage_path(data_dir.path()).unwrap();
+        publish(&service, "jobs", b"drop").await;
+        let pulled = pull_once(&service, "jobs").await;
+        assert!(
+            nack(&service, pulled.messages[0].delivery_id.clone(), false)
+                .await
+                .accepted
+        );
+    }
+
+    let service = BrokerService::with_storage_path(data_dir.path()).unwrap();
+    let stats = stats(&service, "jobs").await;
+    assert_eq!(stats.ready, 0);
+    assert_eq!(stats.in_flight, 0);
 }

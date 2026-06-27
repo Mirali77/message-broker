@@ -1,4 +1,6 @@
-#[derive(Clone, Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct StoredMessage {
     pub(crate) message_id: String,
     pub(crate) queue: String,

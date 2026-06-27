@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,6 +16,7 @@ use crate::proto::{
     QueueStatsResponse,
 };
 use crate::state::{BrokerState, InFlightMessage};
+use crate::storage::DurableStore;
 
 pub(crate) const DEFAULT_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_MAX_MESSAGES: usize = 1;
@@ -24,6 +26,7 @@ pub(crate) const MAX_BATCH_SIZE: usize = 100;
 pub struct BrokerService {
     state: Arc<Mutex<BrokerState>>,
     notify: Arc<Notify>,
+    storage: Option<Arc<DurableStore>>,
 }
 
 impl BrokerService {
@@ -31,14 +34,35 @@ impl BrokerService {
         Self::default()
     }
 
+    pub fn with_storage_path(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let storage = Arc::new(DurableStore::open(path)?);
+        let state = storage.load()?;
+
+        Ok(Self {
+            state: Arc::new(Mutex::new(state)),
+            notify: Arc::new(Notify::new()),
+            storage: Some(storage),
+        })
+    }
+
+    fn persist_state(&self, state: &BrokerState) -> Result<(), Status> {
+        if let Some(storage) = &self.storage {
+            storage.save(state).map_err(|error| {
+                Status::internal(format!("failed to persist broker state: {error}"))
+            })?;
+        }
+
+        Ok(())
+    }
+
     async fn pull_available(
         &self,
         queue: &str,
         max_messages: usize,
         visibility_timeout: Duration,
-    ) -> Vec<BrokerMessage> {
+    ) -> Result<Vec<BrokerMessage>, Status> {
         let mut state = self.state.lock().await;
-        state.requeue_expired(tokio::time::Instant::now());
+        let expired_requeued = state.requeue_expired(tokio::time::Instant::now());
 
         let mut messages = Vec::new();
 
@@ -69,7 +93,11 @@ impl BrokerService {
             messages.push(response_message);
         }
 
-        messages
+        if expired_requeued || !messages.is_empty() {
+            self.persist_state(&state)?;
+        }
+
+        Ok(messages)
     }
 }
 
@@ -108,6 +136,7 @@ impl Broker for BrokerService {
                 .entry(queue.clone())
                 .or_default()
                 .push_back(message);
+            self.persist_state(&state)?;
         }
 
         self.notify.notify_waiters();
@@ -127,7 +156,7 @@ impl Broker for BrokerService {
         loop {
             let messages = self
                 .pull_available(&queue, max_messages, visibility_timeout)
-                .await;
+                .await?;
 
             if !messages.is_empty() || tokio::time::Instant::now() >= deadline {
                 return Ok(Response::new(PullResponse { messages }));
@@ -146,8 +175,12 @@ impl Broker for BrokerService {
         let delivery_id = normalize_delivery_id(req.delivery_id)?;
         let acknowledged = {
             let mut state = self.state.lock().await;
-            state.requeue_expired(tokio::time::Instant::now());
-            state.in_flight.remove(&delivery_id).is_some()
+            let expired_requeued = state.requeue_expired(tokio::time::Instant::now());
+            let acknowledged = state.in_flight.remove(&delivery_id).is_some();
+            if expired_requeued || acknowledged {
+                self.persist_state(&state)?;
+            }
+            acknowledged
         };
 
         Ok(Response::new(AckResponse { acknowledged }))
@@ -158,7 +191,7 @@ impl Broker for BrokerService {
         let delivery_id = normalize_delivery_id(req.delivery_id)?;
         let accepted = {
             let mut state = self.state.lock().await;
-            state.requeue_expired(tokio::time::Instant::now());
+            let expired_requeued = state.requeue_expired(tokio::time::Instant::now());
 
             if let Some(delivery) = state.in_flight.remove(&delivery_id) {
                 if req.requeue {
@@ -168,8 +201,12 @@ impl Broker for BrokerService {
                         .or_default()
                         .push_front(delivery.message);
                 }
+                self.persist_state(&state)?;
                 true
             } else {
+                if expired_requeued {
+                    self.persist_state(&state)?;
+                }
                 false
             }
         };
@@ -189,7 +226,9 @@ impl Broker for BrokerService {
         let queue = normalize_queue(req.queue)?;
         let (ready, in_flight) = {
             let mut state = self.state.lock().await;
-            state.requeue_expired(tokio::time::Instant::now());
+            if state.requeue_expired(tokio::time::Instant::now()) {
+                self.persist_state(&state)?;
+            }
             state.queue_stats(&queue)
         };
 

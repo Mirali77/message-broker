@@ -15,7 +15,7 @@ pub(crate) struct BrokerState {
 }
 
 impl BrokerState {
-    pub(crate) fn requeue_expired(&mut self, now: tokio::time::Instant) {
+    pub(crate) fn requeue_expired(&mut self, now: tokio::time::Instant) -> bool {
         let expired_delivery_ids = self
             .in_flight
             .iter()
@@ -23,6 +23,7 @@ impl BrokerState {
                 (delivery.deadline <= now).then(|| delivery_id.clone())
             })
             .collect::<Vec<_>>();
+        let changed = !expired_delivery_ids.is_empty();
 
         for delivery_id in expired_delivery_ids {
             if let Some(delivery) = self.in_flight.remove(&delivery_id) {
@@ -32,6 +33,8 @@ impl BrokerState {
                     .push_front(delivery.message);
             }
         }
+
+        changed
     }
 
     pub(crate) fn queue_stats(&self, queue: &str) -> (u64, u64) {
