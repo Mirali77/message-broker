@@ -5,6 +5,10 @@ package broker.v1;
 service Broker {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc Publish(PublishRequest) returns (PublishResponse);
+  rpc Pull(PullRequest) returns (PullResponse);
+  rpc Ack(AckRequest) returns (AckResponse);
+  rpc Nack(NackRequest) returns (NackResponse);
+  rpc QueueStats(QueueStatsRequest) returns (QueueStatsResponse);
 }
 
 message HealthRequest {}
@@ -26,4 +30,51 @@ message PublishRequest {
 
 message PublishResponse {
   string message_id = 1;
+}
+
+message PullRequest {
+  string queue = 1;
+  uint32 max_messages = 2;
+  uint64 visibility_timeout_ms = 3;
+  uint64 wait_timeout_ms = 4;
+}
+
+message BrokerMessage {
+  string message_id = 1;
+  string delivery_id = 2;
+  string queue = 3;
+  bytes payload = 4;
+  uint32 attempts = 5;
+  int64 created_at_unix_ms = 6;
+}
+
+message PullResponse {
+  repeated BrokerMessage messages = 1;
+}
+
+message AckRequest {
+  string delivery_id = 1;
+}
+
+message AckResponse {
+  bool acknowledged = 1;
+}
+
+message NackRequest {
+  string delivery_id = 1;
+  bool requeue = 2;
+}
+
+message NackResponse {
+  bool accepted = 1;
+}
+
+message QueueStatsRequest {
+  string queue = 1;
+}
+
+message QueueStatsResponse {
+  string queue = 1;
+  uint64 ready = 2;
+  uint64 in_flight = 3;
 }
