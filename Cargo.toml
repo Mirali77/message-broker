@@ -16,3 +16,10 @@ tonic-prost = "0.14.6"
 [build-dependencies]
 tonic-build = "0.14.6"
 tonic-prost-build = "0.14.6"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["async_tokio"] }
+
+[[bench]]
+name = "broker"
+harness = false
